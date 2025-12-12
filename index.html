@@ -478,7 +478,7 @@ ${jsonExample}`;
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
                             {!aiSettings.useAllQuestions && <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}># Questions</label><input type="number" value={aiSettings.numQuestions} onChange={e => setAiSettings({ ...aiSettings, numQuestions: +e.target.value })} style={inputStyle} /></div>}
                             <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Points</label><input type="number" value={aiSettings.points} onChange={e => setAiSettings({ ...aiSettings, points: +e.target.value })} style={inputStyle} /></div>
-                            <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Type</label><select value={aiSettings.qType} onChange={e => setAiSettings({ ...aiSettings, qType: e.target.value })} style={inputStyle}>{aiSettings.useAllQuestions && <option>As in file</option>}<option>Single Choice</option><option>Multiple Choice</option></select></div>
+                            {!aiSettings.useAllQuestions && <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Type</label><select value={aiSettings.qType} onChange={e => setAiSettings({ ...aiSettings, qType: e.target.value })} style={inputStyle}><option>Single Choice</option><option>Multiple Choice</option></select></div>}
                             <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags</label><input value={aiSettings.tags} onChange={e => setAiSettings({ ...aiSettings, tags: e.target.value })} style={inputStyle} /></div>
                           </div>
                           
@@ -570,7 +570,7 @@ ${jsonExample}`;
                         <input type="checkbox" checked={alt.correct} onChange={e => updateAlt(qi, ai, 'correct', e.target.checked)} style={{ width: '18px', height: '18px', accentColor: '#f37021' }} />
                         <input value={alt.text} onChange={e => updateAlt(qi, ai, 'text', e.target.value)} placeholder={'Alternative ' + (ai + 1)} style={{ ...inputStyle, flex: 1, backgroundColor: alt.correct ? '#f0fff0' : '#fff' }} />
                       </div>
-                      {q.questionType === 'Single Choice' && (q.showFeedback || hasAltFeedback(q)) && (
+                      {q.questionType === 'Single Choice' && hasAltFeedback(q) && (
                         <div style={{ marginTop: '8px', marginLeft: '30px' }}>
                           <input value={alt.feedback || ''} onChange={e => updateAlt(qi, ai, 'feedback', e.target.value)} placeholder={alt.correct ? 'Feedback: Correct! Explain why...' : 'Feedback: Explain why incorrect...'} style={{ ...inputStyle, fontSize: '13px' }} />
                         </div>
@@ -579,10 +579,10 @@ ${jsonExample}`;
                   ))}
                   <p style={{ margin: '8px 0 0', color: '#999', fontSize: '12px' }}>☑️ Check to mark correct. {q.questionType === 'Single Choice' ? 'Only 1 allowed.' : q.scoring === 'Weighted' ? 'Percentages auto-calculated.' : 'At least 1 incorrect required.'}</p>
                 </div>
-                {q.questionType === 'Single Choice' && !q.showFeedback && !hasAltFeedback(q) && (
+                {q.questionType === 'Single Choice' && !hasQFeedback(q) && !hasAltFeedback(q) && (
                   <button onClick={() => updateQ(qi, 'showFeedback', true)} style={{ ...btnSecondary, fontSize: '13px', padding: '6px 12px' }}>+ Add Feedback</button>
                 )}
-                {q.questionType === 'Multiple Choice' && (
+                {(q.questionType === 'Multiple Choice' || (q.questionType === 'Single Choice' && (hasQFeedback(q) || (q.showFeedback && !hasAltFeedback(q))))) && (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                     <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Correct Feedback</label><input value={q.correctFb} onChange={e => updateQ(qi, 'correctFb', e.target.value)} placeholder="Great job! You correctly identified..." style={inputStyle} /></div>
                     <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Incorrect Feedback</label><input value={q.incorrectFb} onChange={e => updateQ(qi, 'incorrectFb', e.target.value)} placeholder="Review the section on..." style={inputStyle} /></div>
