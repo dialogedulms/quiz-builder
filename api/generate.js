@@ -43,8 +43,8 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'GEMINI_API_KEY not configured' });
     }
 
-    // Use gemini-1.5-flash for paid tier (stable and fast)
-    const model = 'gemini-1.5-flash';
+    // Use gemini-3-pro-preview (shown in user's AI Studio)
+    const model = 'gemini-3-pro-preview';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -73,8 +73,7 @@ export default async function handler(req, res) {
     if (data.error) {
       console.error('Gemini API error:', JSON.stringify(data.error));
       return res.status(400).json({ 
-        error: data.error.message || 'Gemini API error',
-        details: data.error.status || ''
+        error: data.error.message || 'Gemini API error'
       });
     }
 
