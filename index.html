@@ -165,8 +165,9 @@
         
         const feedbackInstr = !aiSettings.addFeedback ? 'Do NOT include any feedback fields - leave correctFeedback, incorrectFeedback, and alternative feedback as empty strings ""' :
           aiSettings.feedbackSource === 'generic' ? 'Use generic feedback: correctFeedback="Correct! Great job.", incorrectFeedback="Incorrect. Please review the material."' :
-          aiSettings.feedbackSource === 'inherited' ? 'IMPORTANT: Look for "Rationale for correct answer:" or "Rationale:" in the source text and use that exact text as correctFeedback. For incorrectFeedback use "Incorrect. Please review the material."' :
-          'Create educational feedback explaining why the answer is correct/incorrect';
+          aiSettings.feedbackSource === 'inherited' ? 'IMPORTANT: Look for "Rationale for correct answer:" or "Rationale:" in the source. Extract ONLY the explanation text (remove the "Rationale for correct answer: A and B." prefix - just keep the actual explanation). Put this in correctFeedback. For incorrectFeedback use "Incorrect. Please review the material." Do NOT put feedback in alternatives - use question-level feedback only.' :
+          (aiSettings.feedbackLevel === 'alternative' ? 'Include educational "feedback" for each alternative explaining why it is correct or incorrect' :
+          'Include educational "correctFeedback" and "incorrectFeedback" at question level');
 
         if (aiMode === 'topic') {
           prompt = `Generate quiz questions based on: "${aiSettings.topic}"
@@ -252,14 +253,21 @@ ${jsonExample}`;
           const newQs = parsed.questions.map((q, i) => {
             const alts = q.alternatives || [];
             const processedAlts = aiSettings.randomizeAlts ? shuffleArray(alts) : alts;
-            const hasFb = alts.some(a => a.feedback) || q.correctFeedback || q.incorrectFeedback;
+            
+            // For inherited/generic feedback, only use question-level feedback (ignore alternative feedback)
+            const useQuestionLevelOnly = aiSettings.feedbackSource === 'inherited' || aiSettings.feedbackSource === 'generic';
+            const hasQFb = q.correctFeedback || q.incorrectFeedback;
+            const hasAltFb = !useQuestionLevelOnly && alts.some(a => a.feedback);
+            
             return {
               ...createQuestion(), id: Date.now() + i, questionType: q.questionType || 'Single Choice',
               scoring: q.scoring || 'Simple', questionText: q.questionText || '', points: String(q.points || 10),
               tags: q.tags || '', numAlts: Math.min(processedAlts.length || 4, 5),
-              correctFb: q.correctFeedback || '', incorrectFb: q.incorrectFeedback || '', showFeedback: hasFb,
+              correctFb: q.correctFeedback || '', incorrectFb: q.incorrectFeedback || '', 
+              showFeedback: hasQFb || hasAltFb,
               alternatives: [...processedAlts.slice(0, 5).map(a => ({
-                text: a.text || '', correct: !!a.correct, pct: '', feedback: a.feedback || ''
+                text: a.text || '', correct: !!a.correct, pct: '', 
+                feedback: useQuestionLevelOnly ? '' : (a.feedback || '')  // Clear alt feedback for inherited/generic
               })), ...Array(5).fill(null)].slice(0, 5).map(a => a || { text: '', correct: false, pct: '', feedback: '' })
             };
           });
@@ -428,7 +436,7 @@ ${jsonExample}`;
                         
                         {aiSettings.addFeedback && (
                           <div style={{ marginLeft: '26px', marginTop: '8px', padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '4px' }}>
-                            {aiSettings.qType === 'Single Choice' && (
+                            {aiSettings.qType === 'Single Choice' && aiSettings.feedbackSource === 'ai' && (
                               <div style={{ marginBottom: '12px' }}>
                                 <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Feedback Level</label>
                                 <div style={{ display: 'flex', gap: '16px' }}>
@@ -479,7 +487,7 @@ ${jsonExample}`;
                           
                           {aiSettings.addFeedback && (
                             <div style={{ marginLeft: '26px', marginTop: '8px', padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '4px' }}>
-                              {(aiSettings.qType === 'Single Choice' || aiSettings.qType === 'As in file') && (
+                              {(aiSettings.qType === 'Single Choice' || aiSettings.qType === 'As in file') && aiSettings.feedbackSource === 'ai' && (
                                 <div style={{ marginBottom: '12px' }}>
                                   <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Feedback Level</label>
                                   <div style={{ display: 'flex', gap: '16px' }}>
