@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -16,6 +17,11 @@
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useRef } = React;
+
+    // Set PDF.js worker
+    if (window.pdfjsLib) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
 
     function QuizBuilder() {
       const [questions, setQuestions] = useState([]);
@@ -28,6 +34,8 @@
       const [generationsUsed, setGenerationsUsed] = useState(0);
       const MAX_GENERATIONS = 20;
       const fileInputRef = useRef(null);
+      const abortControllerRef = useRef(null);
+      const [isDragging, setIsDragging] = useState(false);
       
       const [aiSettings, setAiSettings] = useState({
         topic: '',
@@ -85,17 +93,81 @@
         setQuestions(updated);
       };
 
-      const handleFile = async (e) => {
-        const file = e.target.files?.[0];
+      // Extract text from PDF
+      const extractPdfText = async (arrayBuffer) => {
+        try {
+          const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+          let fullText = '';
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += pageText + '\n';
+          }
+          return fullText;
+        } catch (err) {
+          console.error('PDF extraction error:', err);
+          throw new Error('Could not read PDF. Please try a text file instead.');
+        }
+      };
+
+      const handleFile = async (file) => {
         if (!file) return;
         setUploadedFile(file);
         
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          const base64 = ev.target.result.split(',')[1];
-          setFileContent({ type: file.type, data: base64 });
-        };
-        reader.readAsDataURL(file);
+        try {
+          if (file.type === 'application/pdf') {
+            const arrayBuffer = await file.arrayBuffer();
+            const text = await extractPdfText(arrayBuffer);
+            setFileContent({ type: 'text/plain', text: text });
+          } else if (file.type.startsWith('text/') || file.name.endsWith('.txt')) {
+            const text = await file.text();
+            setFileContent({ type: 'text/plain', text: text });
+          } else if (file.type.startsWith('image/')) {
+            // For images, we'll just note that it's an image - Groq can't process images
+            setFileContent({ type: 'image', text: `[Image file: ${file.name}]` });
+            setGenStatus('Note: Image files cannot be processed directly. Please use text or PDF files.');
+          } else {
+            // Try to read as text
+            const text = await file.text();
+            setFileContent({ type: 'text/plain', text: text });
+          }
+        } catch (err) {
+          setGenStatus(`Error reading file: ${err.message}`);
+        }
+      };
+
+      const handleFileInput = (e) => {
+        const file = e.target.files?.[0];
+        if (file) handleFile(file);
+      };
+
+      // Drag and drop handlers
+      const handleDragOver = (e) => {
+        e.preventDefault();
+        setIsDragging(true);
+      };
+
+      const handleDragLeave = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+      };
+
+      const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        const file = e.dataTransfer.files?.[0];
+        if (file) handleFile(file);
+      };
+
+      // Cancel generation
+      const cancelGeneration = () => {
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+        setIsGenerating(false);
+        setGenStatus('Generation cancelled.');
       };
 
       const generateQuestions = async () => {
@@ -103,6 +175,9 @@
           setGenStatus('Generation limit reached. Please start over or come back later.');
           return;
         }
+
+        // Create abort controller for cancellation
+        abortControllerRef.current = new AbortController();
 
         setIsGenerating(true);
         setGenStatus('Generating...');
@@ -114,14 +189,16 @@
 "${aiSettings.topic}"
 
 IMPORTANT INSTRUCTIONS:
-1. Parse the request for: number of questions, question types, points, tags, feedback preferences
+1. Parse the request for: number of questions, question types, points, feedback preferences
 2. Default to 5 questions if not specified
 3. Default to 10 points if not specified
 4. Question types are: "Single Choice" (exactly 1 correct) or "Multiple Choice" (2+ correct answers possible, but must have at least 1 incorrect)
 5. If user asks for "randomized types" or "mix", alternate between Single Choice and Multiple Choice
 6. If user mentions "weighted" for Multiple Choice, set "scoring": "Weighted" (otherwise use "Simple")
+7. TAGS: Only include "tags" field if the user EXPLICITLY mentions tags in their request. If user doesn't mention tags, set tags to empty string "".
 
 FEEDBACK RULES (CRITICAL):
+- Only include feedback if user requests it
 - "Single Choice" questions: Include "feedback" for EACH alternative
 - "Multiple Choice" questions: Include "correctFeedback" and "incorrectFeedback" at question level ONLY (never per-alternative)
 
@@ -133,24 +210,10 @@ OUTPUT FORMAT - Return ONLY valid JSON, no other text:
       "scoring": "Simple",
       "questionText": "Question here?",
       "points": 10,
-      "tags": "Tag here",
+      "tags": "",
       "alternatives": [
         {"text": "Option A", "correct": true, "feedback": "Correct! Explanation..."},
         {"text": "Option B", "correct": false, "feedback": "Incorrect. Explanation..."}
-      ]
-    },
-    {
-      "questionType": "Multiple Choice",
-      "scoring": "Weighted",
-      "questionText": "Question here?",
-      "points": 10,
-      "tags": "Tag here",
-      "correctFeedback": "Great job!",
-      "incorrectFeedback": "Review this topic.",
-      "alternatives": [
-        {"text": "Option A", "correct": true},
-        {"text": "Option B", "correct": true},
-        {"text": "Option C", "correct": false}
       ]
     }
   ]
@@ -170,7 +233,11 @@ Remember: Output ONLY the JSON object, nothing else.`;
             ? `FEEDBACK (REQUIRED):
 - For "Single Choice": Include "feedback" for EACH alternative with positive, encouraging tone
 - For "Multiple Choice": Include "correctFeedback" and "incorrectFeedback" at question level`
-            : 'No feedback needed';
+            : 'NO feedback - do not include any feedback fields';
+
+          const tagsInstruction = aiSettings.tags.trim() 
+            ? `- Tag each question with: "${aiSettings.tags}"`
+            : '- Do NOT include tags (set tags to empty string "")';
 
           prompt = `You are a quiz question generator. Process these questions:
 
@@ -186,7 +253,7 @@ REQUIREMENTS:
 - ${typeInstruction}
 - ${difficultyInstruction}
 - ${aiSettings.points} points per question
-${aiSettings.tags ? `- Tag each question: "${aiSettings.tags}"` : ''}
+${tagsInstruction}
 
 ${feedbackInstruction}
 
@@ -223,16 +290,25 @@ Output ONLY JSON, no other text.`;
 
           const feedbackInstruction = aiSettings.addFeedback
             ? `FEEDBACK (REQUIRED): Include encouraging feedback for each question/alternative`
-            : 'No feedback needed';
+            : 'NO feedback - do not include any feedback fields';
 
-          prompt = `Based on this content, generate ${aiSettings.numQuestions} quiz questions.
+          const tagsInstruction = aiSettings.tags.trim() 
+            ? `- Tag each question with: "${aiSettings.tags}"`
+            : '- Do NOT include tags (set tags to empty string "")';
+
+          const documentContent = fileContent?.text || '[No content available]';
+
+          prompt = `Based on the following document content, generate ${aiSettings.numQuestions} quiz questions that test understanding of the key concepts.
+
+DOCUMENT CONTENT:
+${documentContent}
 
 REQUIREMENTS:
 - ${typeInstruction}
 - ${altsInstruction}
 - ${difficultyInstruction}
 - ${aiSettings.points} points per question
-${aiSettings.tags ? `- Tag: "${aiSettings.tags}"` : ''}
+${tagsInstruction}
 ${feedbackInstruction}
 
 OUTPUT FORMAT - Return ONLY valid JSON:
@@ -257,17 +333,11 @@ Output ONLY JSON.`;
             prompt: prompt
           };
 
-          if (aiMode === 'upload' && fileContent) {
-            requestBody.file = {
-              type: fileContent.type,
-              data: fileContent.data
-            };
-          }
-
           const res = await fetch('/api/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
+            body: JSON.stringify(requestBody),
+            signal: abortControllerRef.current.signal
           });
           
           const data = await res.json();
@@ -330,10 +400,15 @@ Output ONLY JSON.`;
           setUploadedFile(null);
           setFileContent(null);
         } catch (err) {
-          console.error('Generation error:', err);
-          setGenStatus(`Error: ${err.message}`);
+          if (err.name === 'AbortError') {
+            setGenStatus('Generation cancelled.');
+          } else {
+            console.error('Generation error:', err);
+            setGenStatus(`Error: ${err.message}`);
+          }
         }
         setIsGenerating(false);
+        abortControllerRef.current = null;
       };
 
       const hasAltFeedback = (q) => (q.alternatives || []).some(a => a && (a.feedback || '').trim());
@@ -444,11 +519,16 @@ Output ONLY JSON.`;
             return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g,'""')}"` : s;
           }).join(',')).join('\n');
           
+          // Create unique filename with timestamp
+          const now = new Date();
+          const timestamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+          const filename = `quiz_export_${timestamp}.csv`;
+          
           const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = 'quiz_export.csv';
+          a.download = filename;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -495,6 +575,10 @@ Output ONLY JSON.`;
         border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '14px'
       };
 
+      const checkboxStyle = {
+        display: 'flex', alignItems: 'center', gap: '8px', marginTop: '16px', cursor: 'pointer', fontSize: '14px', color: '#333'
+      };
+
       return (
         <div style={{ minHeight: '100vh', backgroundColor: '#f5f5f5', color: '#333', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', padding: '0' }}>
           {/* Header */}
@@ -533,7 +617,7 @@ Output ONLY JSON.`;
                       </button>
                       <button onClick={() => { setAiMode('upload'); setShowAIPanel(true); setShowAddMenu(false); }} style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '12px 16px', border: 'none', backgroundColor: 'transparent', cursor: 'pointer', textAlign: 'left', fontSize: '14px', color: '#333', borderBottom: '1px solid #eee' }}>
                         <span style={{ fontSize: '18px' }}>📄</span>
-                        <div><div style={{ fontWeight: '500' }}>From Document</div><div style={{ fontSize: '12px', color: '#888' }}>Upload PDF or image</div></div>
+                        <div><div style={{ fontWeight: '500' }}>From Document</div><div style={{ fontSize: '12px', color: '#888' }}>Upload PDF or text file</div></div>
                       </button>
                       <button onClick={() => { setQuestions([...questions, createQuestion()]); setShowAddMenu(false); }} style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '12px 16px', border: 'none', backgroundColor: 'transparent', cursor: 'pointer', textAlign: 'left', fontSize: '14px', color: '#333' }}>
                         <span style={{ fontSize: '18px' }}>✏️</span>
@@ -572,7 +656,7 @@ Output ONLY JSON.`;
               <div style={{ backgroundColor: '#fff', borderRadius: '6px', width: '100%', maxWidth: '600px', maxHeight: '90vh', overflow: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}>
                 <div style={{ padding: '18px 20px', borderBottom: '1px solid #ddd', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <h2 style={{ margin: 0, color: '#333', fontSize: '18px', fontWeight: '600' }}>✨ AI Quiz Generator</h2>
-                  <button onClick={() => setShowAIPanel(false)} style={{ background: 'none', border: 'none', color: '#999', fontSize: '24px', cursor: 'pointer', lineHeight: 1 }}>×</button>
+                  <button onClick={() => { setShowAIPanel(false); cancelGeneration(); }} style={{ background: 'none', border: 'none', color: '#999', fontSize: '24px', cursor: 'pointer', lineHeight: 1 }}>×</button>
                 </div>
                 
                 <div style={{ display: 'flex', borderBottom: '1px solid #ddd' }}>
@@ -585,9 +669,9 @@ Output ONLY JSON.`;
                   {aiMode === 'topic' && (
                     <div>
                       <label style={{ display: 'block', marginBottom: '8px', color: '#666', fontSize: '13px', fontWeight: '500' }}>Describe exactly what you want</label>
-                      <textarea value={aiSettings.topic} onChange={e => setAiSettings({ ...aiSettings, topic: e.target.value })} placeholder="e.g., Create 10 quiz questions about bloodborne pathogens for healthcare workers. Randomize between Single Choice and Multiple Choice. 10 points each. Tag with 'Compliance'. Include encouraging feedback." rows={6} style={{ ...inputStyle, resize: 'vertical' }} />
+                      <textarea value={aiSettings.topic} onChange={e => setAiSettings({ ...aiSettings, topic: e.target.value })} placeholder="e.g., Create 10 quiz questions about bloodborne pathogens for healthcare workers. Randomize between Single Choice and Multiple Choice. 10 points each. Include encouraging feedback." rows={6} style={{ ...inputStyle, resize: 'vertical' }} />
                       <p style={{ margin: '8px 0 0', color: '#999', fontSize: '12px' }}>
-                        💡 AI interprets your full request. Specify: questions, types, scoring, points, tags, feedback.
+                        💡 AI interprets your full request. Specify: questions, types, scoring, points, tags (only if needed), feedback.
                       </p>
                     </div>
                   )}
@@ -604,12 +688,27 @@ Output ONLY JSON.`;
                   
                   {aiMode === 'upload' && (
                     <div>
-                      <div onClick={() => fileInputRef.current?.click()} style={{ border: '2px dashed #ddd', borderRadius: '6px', padding: '40px', textAlign: 'center', cursor: 'pointer', backgroundColor: '#fafafa' }}>
-                        <input ref={fileInputRef} type="file" onChange={handleFile} accept=".pdf,.png,.jpg,.jpeg,.txt" style={{ display: 'none' }} />
+                      <div 
+                        onClick={() => fileInputRef.current?.click()} 
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        style={{ 
+                          border: `2px dashed ${isDragging ? '#f37021' : '#ddd'}`, 
+                          borderRadius: '6px', 
+                          padding: '40px', 
+                          textAlign: 'center', 
+                          cursor: 'pointer', 
+                          backgroundColor: isDragging ? '#fff5f0' : '#fafafa',
+                          transition: 'all 0.2s'
+                        }}
+                      >
+                        <input ref={fileInputRef} type="file" onChange={handleFileInput} accept=".pdf,.txt,.doc,.docx" style={{ display: 'none' }} />
                         {uploadedFile ? <p style={{ color: '#5cb85c', margin: 0, fontWeight: '500' }}>📄 {uploadedFile.name}</p> : (
                           <div>
                             <div style={{ fontSize: '32px', marginBottom: '8px' }}>📁</div>
-                            <p style={{ color: '#888', margin: 0 }}>Click to upload PDF, Image, or Text</p>
+                            <p style={{ color: '#888', margin: 0 }}>Drag & drop or click to upload</p>
+                            <p style={{ color: '#aaa', margin: '8px 0 0', fontSize: '12px' }}>PDF or Text files supported</p>
                           </div>
                         )}
                       </div>
@@ -651,13 +750,14 @@ Output ONLY JSON.`;
                           </select>
                         </div>
                         <div style={{ gridColumn: 'span 2' }}>
-                          <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags</label>
-                          <input value={aiSettings.tags} onChange={e => setAiSettings({ ...aiSettings, tags: e.target.value })} placeholder="Quiz 1" style={inputStyle} />
+                          <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags (optional)</label>
+                          <input value={aiSettings.tags} onChange={e => setAiSettings({ ...aiSettings, tags: e.target.value })} placeholder="Leave blank for no tags" style={inputStyle} />
                         </div>
                       </div>
-                      <button onClick={() => setAiSettings({ ...aiSettings, addFeedback: !aiSettings.addFeedback })} style={{ marginTop: '16px', padding: '10px 16px', backgroundColor: aiSettings.addFeedback ? '#f37021' : '#fff', color: aiSettings.addFeedback ? '#fff' : '#666', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>
-                        {aiSettings.addFeedback ? '✓' : '+'} Add Feedback
-                      </button>
+                      <label style={checkboxStyle}>
+                        <input type="checkbox" checked={aiSettings.addFeedback} onChange={e => setAiSettings({ ...aiSettings, addFeedback: e.target.checked })} style={{ width: '18px', height: '18px', accentColor: '#f37021' }} />
+                        Add encouraging feedback
+                      </label>
                     </div>
                   )}
 
@@ -700,13 +800,14 @@ Output ONLY JSON.`;
                           </select>
                         </div>
                         <div>
-                          <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags</label>
-                          <input value={aiSettings.tags} onChange={e => setAiSettings({ ...aiSettings, tags: e.target.value })} placeholder="Quiz 1" style={inputStyle} />
+                          <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags (optional)</label>
+                          <input value={aiSettings.tags} onChange={e => setAiSettings({ ...aiSettings, tags: e.target.value })} placeholder="Leave blank for no tags" style={inputStyle} />
                         </div>
                       </div>
-                      <button onClick={() => setAiSettings({ ...aiSettings, addFeedback: !aiSettings.addFeedback })} style={{ marginTop: '16px', padding: '10px 16px', backgroundColor: aiSettings.addFeedback ? '#f37021' : '#fff', color: aiSettings.addFeedback ? '#fff' : '#666', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>
-                        {aiSettings.addFeedback ? '✓' : '+'} Add Feedback
-                      </button>
+                      <label style={checkboxStyle}>
+                        <input type="checkbox" checked={aiSettings.addFeedback} onChange={e => setAiSettings({ ...aiSettings, addFeedback: e.target.checked })} style={{ width: '18px', height: '18px', accentColor: '#f37021' }} />
+                        Add encouraging feedback
+                      </label>
                     </div>
                   )}
                   
@@ -714,7 +815,11 @@ Output ONLY JSON.`;
                 </div>
                 
                 <div style={{ padding: '16px 20px', borderTop: '1px solid #ddd', display: 'flex', justifyContent: 'flex-end', gap: '10px', backgroundColor: '#fafafa' }}>
-                  <button onClick={() => setShowAIPanel(false)} style={btnSecondary}>Cancel</button>
+                  {isGenerating ? (
+                    <button onClick={cancelGeneration} style={{ ...btnSecondary, color: '#d9534f', borderColor: '#d9534f' }}>✕ Cancel</button>
+                  ) : (
+                    <button onClick={() => setShowAIPanel(false)} style={btnSecondary}>Close</button>
+                  )}
                   <button onClick={generateQuestions} disabled={isGenerating || generationsUsed >= MAX_GENERATIONS || (aiMode === 'topic' && !aiSettings.topic.trim()) || (aiMode === 'paste' && !aiSettings.pastedQuestions.trim()) || (aiMode === 'upload' && !fileContent)} style={{ ...btnPrimary, opacity: isGenerating ? 0.7 : 1 }}>
                     {isGenerating ? '⏳ Generating...' : '✨ Generate'}
                   </button>
@@ -798,7 +903,7 @@ Output ONLY JSON.`;
                   </div>
                   <div>
                     <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags</label>
-                    <input value={q.tags} onChange={e => updateQ(qi, 'tags', e.target.value)} placeholder="tag1, tag2" style={inputStyle} />
+                    <input value={q.tags} onChange={e => updateQ(qi, 'tags', e.target.value)} placeholder="optional" style={inputStyle} />
                   </div>
                 </div>
                 
