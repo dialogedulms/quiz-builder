@@ -161,7 +161,7 @@
         abortControllerRef.current = new AbortController();
 
         let prompt = '';
-        const jsonExample = `{"questions":[{"questionType":"Single Choice","scoring":"Simple","questionText":"What is X?","points":10,"tags":"","correctFeedback":"","incorrectFeedback":"","alternatives":[{"text":"Option A","correct":true,"feedback":""},{"text":"Option B","correct":false,"feedback":""}]}]}`;
+        const jsonExample = `{"questions":[{"questionType":"Single Choice","scoring":"Simple","questionText":"What is X?","points":10,"tags":"","correctFeedback":"","incorrectFeedback":"","alternatives":[{"text":"Option A","correct":false,"feedback":""},{"text":"Option B","correct":true,"feedback":""},{"text":"Option C","correct":false,"feedback":""},{"text":"Option D","correct":false,"feedback":""},{"text":"Option E","correct":false,"feedback":""}]}]}`;
         
         const feedbackInstr = !aiSettings.addFeedback ? 'Do NOT include any feedback fields - leave correctFeedback, incorrectFeedback, and alternative feedback as empty strings ""' :
           aiSettings.feedbackSource === 'generic' ? 'Use generic feedback: correctFeedback="Correct! Great job.", incorrectFeedback="Incorrect. Please review the material."' :
@@ -200,18 +200,21 @@ ${jsonExample}`;
           const altInstr = aiSettings.numAlts === 'inherited' ? 
             'Keep ALL alternatives exactly as provided (do not add or remove any)' : 
             `Use exactly ${aiSettings.numAlts} alternatives per question`;
-          prompt = `Convert these questions to JSON format:
+          prompt = `Convert these questions to JSON format. The input may be in various formats (plain text, numbered list, or tabular/spreadsheet format with tabs or commas separating columns):
 
 ${aiSettings.pastedQuestions}
 
 RULES:
-- Keep alternatives in EXACT order as given
+- Parse the input format correctly (could be tab-separated table, comma-separated, or plain text)
+- If tabular: columns may include Question, Options/Alternatives, and Correct Answer
 - ${altInstr}
+- Keep alternatives in EXACT order as given
 - Question type: ${aiSettings.qType === 'Randomize' ? 'Vary between Single Choice and Multiple Choice' : aiSettings.qType}
 - Points: ${aiSettings.points} per question
 - Tags: ${aiSettings.tags || 'leave empty ""'}
 - ${feedbackInstr}
-- If correct answer is marked with * or "correct", set that alternative's correct:true
+- Determine correct answer from: asterisk (*), "correct" label, "Correct Answer" column, or answer key
+- Remove option letters (a), b), A., etc.) from the alternative text - just keep the answer text
 
 RESPOND WITH ONLY VALID JSON (no markdown, no explanation):
 ${jsonExample}`;
@@ -455,8 +458,8 @@ ${jsonExample}`;
                     {aiMode === 'paste' && (
                       <div>
                         <label style={{ display: 'block', marginBottom: '8px', color: '#666', fontSize: '13px', fontWeight: '500' }}>Paste your questions</label>
-                        <textarea value={aiSettings.pastedQuestions} onChange={e => setAiSettings({ ...aiSettings, pastedQuestions: e.target.value })} placeholder={"Questions only:\nWhat is the maximum time to report a HIPAA breach?\n\nOr with alternatives (mark correct with *):\nWhat is a bloodborne pathogen? A) Digestive bacterium B) *Microorganism in blood C) Cold virus"} rows={6} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'monospace', fontSize: '13px' }} />
-                        <p style={{ margin: '8px 0 0', color: '#999', fontSize: '12px' }}>💡 Paste questions only (AI generates alternatives) or include alternatives. Mark correct with *.</p>
+                        <textarea value={aiSettings.pastedQuestions} onChange={e => setAiSettings({ ...aiSettings, pastedQuestions: e.target.value })} placeholder={"Questions with alternatives (mark correct with *):\nWhat is a bloodborne pathogen?\na) Digestive bacterium\nb) *Microorganism in blood\nc) Cold virus\n\nOr paste from spreadsheet (tab-separated table)"} rows={6} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'monospace', fontSize: '13px' }} />
+                        <p style={{ margin: '8px 0 0', color: '#999', fontSize: '12px' }}>💡 Supports plain text, numbered lists, or spreadsheet tables. Mark correct with * or include a "Correct Answer" column.</p>
                         
                         <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
                           <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Points</label><input type="number" value={aiSettings.points} onChange={e => setAiSettings({ ...aiSettings, points: +e.target.value })} style={inputStyle} /></div>
