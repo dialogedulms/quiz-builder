@@ -39,7 +39,7 @@
       const [isDragging, setIsDragging] = useState(false);
       
       const [aiSettings, setAiSettings] = useState({
-        topic: '', pastedQuestions: '', numQuestions: 5, points: 10, qType: 'Single Choice',
+        topic: '', pastedQuestions: '', numQuestions: 5, points: 10, qType: 'Inherited',
         numAlts: 'inherited', tags: '', difficulty: 'N/A', addFeedback: false, feedbackLevel: 'question',
         feedbackSource: 'ai', useAllQuestions: true, randomizeAlts: false
       });
@@ -146,8 +146,8 @@
       const clearAll = () => {
         setQuestions([]); setLastPrompt(''); setShowAddMenu(false); setShowAIPanel(false);
         setErrors([]); setShowErrors(false); setUploadedFile(null); setFileContent(null);
-        setAiSettings({ topic: '', pastedQuestions: '', numQuestions: 5, points: 10, qType: 'Single Choice',
-          numAlts: 4, tags: '', difficulty: 'N/A', addFeedback: false, feedbackLevel: 'question',
+        setAiSettings({ topic: '', pastedQuestions: '', numQuestions: 5, points: 10, qType: 'Inherited',
+          numAlts: 'inherited', tags: '', difficulty: 'N/A', addFeedback: false, feedbackLevel: 'question',
           feedbackSource: 'ai', useAllQuestions: true, randomizeAlts: false });
       };
 
@@ -247,7 +247,7 @@ RULES:
 - If tabular: columns may include Question, Options/Alternatives, and Correct Answer
 - ${altInstr}
 - Keep alternatives in EXACT order as given
-- Question type: ${aiSettings.qType === 'Randomize' ? 'Vary between Single Choice and Multiple Choice' : aiSettings.qType}
+- Question type: ${aiSettings.qType === 'Inherited' ? 'Determine from content - if multiple answers marked correct use Multiple Choice, otherwise default to Single Choice' : aiSettings.qType === 'Randomize' ? 'Vary between Single Choice and Multiple Choice' : aiSettings.qType}
 - Points: ${aiSettings.points} per question
 - Tags: ${aiSettings.tags || 'leave empty ""'}
 - ${feedbackInstr}
@@ -257,16 +257,17 @@ RULES:
 RESPOND WITH ONLY VALID JSON (no markdown, no explanation):
 ${jsonExample}`;
           } else {
-            const content = fileContent?.text || '';
+            // Use batchContent if provided (when batching), otherwise use full fileContent
+            const content = batchContent || fileContent?.text || '';
             const extractAll = aiSettings.useAllQuestions;
-            prompt = `${extractAll ? 'Extract ALL quiz questions from this document' : 'Generate ' + aiSettings.numQuestions + ' quiz questions based on this content'}:
+            prompt = `${extractAll ? 'Extract ALL quiz questions from this content' : 'Generate ' + aiSettings.numQuestions + ' quiz questions based on this content'}:
 
 ${content}
 
 RULES:
 - ${extractAll ? 'Find and extract every question with its alternatives' : 'Create questions based on the content'}
 - Keep alternatives in their EXACT original order (A, B, C, D)
-- Question type: ${aiSettings.qType === 'As in file' ? 'Determine from content - if multiple answers marked correct use Multiple Choice, otherwise Single Choice' : aiSettings.qType}
+- Question type: ${aiSettings.qType === 'As in file' || aiSettings.qType === 'Inherited' ? 'Determine from content - if multiple answers marked correct use Multiple Choice, otherwise default to Single Choice' : aiSettings.qType}
 - Points: ${aiSettings.points} per question
 - Tags: ${aiSettings.tags || 'leave empty ""'}
 - ${feedbackInstr}
@@ -334,8 +335,28 @@ ${jsonExample}`;
               const batchQuestions = await processOneBatch(batches[i], i + 1, totalBatches);
               allParsedQuestions = [...allParsedQuestions, ...batchQuestions];
             }
+          } else if (aiMode === 'upload' && aiSettings.useAllQuestions) {
+            // Split document into batches for upload mode when extracting all questions
+            const content = fileContent?.text || '';
+            const batches = splitIntoBatches(content, 10);
+            const totalBatches = batches.length;
+            
+            if (totalBatches > 1) {
+              setGenStatus(`Processing ${totalBatches} batches from document...`);
+            } else {
+              setGenStatus('Processing document... This may take 10-20 seconds.');
+            }
+            
+            for (let i = 0; i < batches.length; i++) {
+              if (abortControllerRef.current.signal.aborted) break;
+              if (totalBatches > 1) {
+                setGenStatus(`Processing batch ${i + 1} of ${totalBatches}...`);
+              }
+              const batchQuestions = await processOneBatch(batches[i], i + 1, totalBatches);
+              allParsedQuestions = [...allParsedQuestions, ...batchQuestions];
+            }
           } else {
-            // Single call for topic and upload modes
+            // Single call for topic mode and upload (generate new questions) mode
             setGenStatus('Generating questions... This may take 10-20 seconds.');
             allParsedQuestions = await processOneBatch(null, 1, 1);
           }
@@ -552,7 +573,7 @@ ${jsonExample}`;
                         
                         <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
                           <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Points</label><input type="number" value={aiSettings.points} onChange={e => setAiSettings({ ...aiSettings, points: +e.target.value })} style={inputStyle} /></div>
-                          <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Type</label><select value={aiSettings.qType} onChange={e => setAiSettings({ ...aiSettings, qType: e.target.value })} style={inputStyle}><option>Single Choice</option><option>Multiple Choice</option><option>Randomize</option></select></div>
+                          <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Type</label><select value={aiSettings.qType} onChange={e => setAiSettings({ ...aiSettings, qType: e.target.value })} style={inputStyle}><option>Inherited</option><option>Single Choice</option><option>Multiple Choice</option><option>Randomize</option></select></div>
                           <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Alternatives</label><select value={aiSettings.numAlts} onChange={e => setAiSettings({ ...aiSettings, numAlts: e.target.value === 'inherited' ? 'inherited' : +e.target.value })} style={inputStyle}><option value="inherited">Inherited</option>{[2,3,4,5,6,7,8,9,10].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
                           <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Difficulty</label><select value={aiSettings.difficulty} onChange={e => setAiSettings({ ...aiSettings, difficulty: e.target.value })} style={inputStyle}><option>N/A</option><option>Easy</option><option>Medium</option><option>Hard</option></select></div>
                           <div style={{ gridColumn: 'span 2' }}><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Tags</label><input value={aiSettings.tags} onChange={e => setAiSettings({ ...aiSettings, tags: e.target.value })} placeholder="Leave blank for no tags" style={inputStyle} /></div>
@@ -563,7 +584,7 @@ ${jsonExample}`;
                         
                         {aiSettings.addFeedback && (
                           <div style={{ marginLeft: '26px', marginTop: '8px', padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '4px' }}>
-                            {aiSettings.qType === 'Single Choice' && aiSettings.feedbackSource === 'ai' && (
+                            {(aiSettings.qType === 'Single Choice' || aiSettings.qType === 'Inherited') && aiSettings.feedbackSource === 'ai' && (
                               <div style={{ marginBottom: '12px' }}>
                                 <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Feedback Level</label>
                                 <div style={{ display: 'flex', gap: '16px' }}>
@@ -614,7 +635,7 @@ ${jsonExample}`;
                           
                           {aiSettings.addFeedback && (
                             <div style={{ marginLeft: '26px', marginTop: '8px', padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '4px' }}>
-                              {(aiSettings.qType === 'Single Choice' || aiSettings.qType === 'As in file') && aiSettings.feedbackSource === 'ai' && (
+                              {(aiSettings.qType === 'Single Choice' || aiSettings.qType === 'As in file' || aiSettings.qType === 'Inherited') && aiSettings.feedbackSource === 'ai' && (
                                 <div style={{ marginBottom: '12px' }}>
                                   <label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Feedback Level</label>
                                   <div style={{ display: 'flex', gap: '16px' }}>
