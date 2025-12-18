@@ -158,10 +158,8 @@
         if (aiMode === 'upload' && fileContent?.type === 'image') { setGenStatus('Images not supported.'); return; }
 
         setIsGenerating(true);
-        setGenStatus('Generating questions... This may take 10-20 seconds.');
         abortControllerRef.current = new AbortController();
 
-        let prompt = '';
         const jsonExample = `{"questions":[{"questionType":"Single Choice","scoring":"Simple","questionText":"What is X?","points":10,"tags":"","correctFeedback":"","incorrectFeedback":"","alternatives":[{"text":"Option A","correct":false,"feedback":""},{"text":"Option B","correct":true,"feedback":""},{"text":"Option C","correct":false,"feedback":""},{"text":"Option D","correct":false,"feedback":""},{"text":"Option E","correct":false,"feedback":""}]}]}`;
         
         const feedbackInstr = !aiSettings.addFeedback ? 'Do NOT include any feedback fields - leave correctFeedback, incorrectFeedback, and alternative feedback as empty strings ""' :
@@ -170,24 +168,66 @@
           (aiSettings.feedbackLevel === 'alternative' ? 'Include educational "feedback" for each alternative explaining why it is correct or incorrect' :
           'Include educational "correctFeedback" and "incorrectFeedback" at question level');
 
-        if (aiMode === 'topic') {
-          // For topic mode, check if user mentions feedback in their prompt
-          const topicLower = aiSettings.topic.toLowerCase();
-          const mentionsFeedback = topicLower.includes('feedback');
-          const wantsQuestionLevel = topicLower.includes('question level') || topicLower.includes('question-level');
-          const wantsAltLevel = topicLower.includes('alternative level') || topicLower.includes('alternative-level') || topicLower.includes('alt level');
+        // Helper to split pasted content into batches
+        const splitIntoBatches = (content, batchSize = 10) => {
+          const lines = content.split('\n');
+          const batches = [];
+          let currentBatch = [];
+          let questionCount = 0;
           
-          let topicFeedbackInstr = 'Do NOT include feedback - leave correctFeedback, incorrectFeedback, and alternative feedback as empty strings ""';
-          if (mentionsFeedback) {
-            if (wantsAltLevel) {
-              topicFeedbackInstr = 'For Single Choice: include "feedback" for each alternative (leave correctFeedback/incorrectFeedback empty). For Multiple Choice: include "correctFeedback" and "incorrectFeedback" at question level (no alternative feedback).';
-            } else {
-              // Default to question-level, or if they explicitly asked for it
-              topicFeedbackInstr = 'Include "correctFeedback" and "incorrectFeedback" at question level. Do NOT include alternative-level feedback. Leave all alternative feedback as empty strings.';
+          // Check if it's tabular (has header row)
+          const firstLine = lines[0] || '';
+          const isTabular = firstLine.includes('\t') && (firstLine.toLowerCase().includes('question') || firstLine.toLowerCase().includes('option'));
+          const headerRow = isTabular ? lines[0] : null;
+          const dataLines = isTabular ? lines.slice(1) : lines;
+          
+          for (const line of dataLines) {
+            const trimmed = line.trim();
+            // Detect question start: Q1, 1., 1), or tabular row with question
+            const isQuestionStart = trimmed.match(/^Q?\d+[\.\)\(:]/i) || 
+              (isTabular && trimmed && !trimmed.startsWith('-') && trimmed.split('\t')[0]?.trim());
+            
+            if (isQuestionStart) {
+              questionCount++;
+              if (questionCount > batchSize && currentBatch.length > 0) {
+                batches.push(headerRow ? headerRow + '\n' + currentBatch.join('\n') : currentBatch.join('\n'));
+                currentBatch = [];
+                questionCount = 1;
+              }
+            }
+            if (trimmed || currentBatch.length > 0) {
+              currentBatch.push(line);
             }
           }
+          if (currentBatch.length > 0) {
+            batches.push(headerRow ? headerRow + '\n' + currentBatch.join('\n') : currentBatch.join('\n'));
+          }
+          return batches.length > 0 ? batches : [content];
+        };
+
+        // Helper to make a single API call and parse response
+        const processOneBatch = async (batchContent, batchNum, totalBatches) => {
+          const altInstr = aiSettings.numAlts === 'inherited' ? 
+            'Keep ALL alternatives exactly as provided (do not add or remove any)' : 
+            `Use exactly ${aiSettings.numAlts} alternatives per question`;
           
-          prompt = `Generate quiz questions based on: "${aiSettings.topic}"
+          let prompt = '';
+          if (aiMode === 'topic') {
+            const topicLower = aiSettings.topic.toLowerCase();
+            const mentionsFeedback = topicLower.includes('feedback');
+            const wantsQuestionLevel = topicLower.includes('question level') || topicLower.includes('question-level');
+            const wantsAltLevel = topicLower.includes('alternative level') || topicLower.includes('alternative-level') || topicLower.includes('alt level');
+            
+            let topicFeedbackInstr = 'Do NOT include feedback - leave correctFeedback, incorrectFeedback, and alternative feedback as empty strings ""';
+            if (mentionsFeedback) {
+              if (wantsAltLevel) {
+                topicFeedbackInstr = 'For Single Choice: include "feedback" for each alternative (leave correctFeedback/incorrectFeedback empty). For Multiple Choice: include "correctFeedback" and "incorrectFeedback" at question level (no alternative feedback).';
+              } else {
+                topicFeedbackInstr = 'Include "correctFeedback" and "incorrectFeedback" at question level. Do NOT include alternative-level feedback. Leave all alternative feedback as empty strings.';
+              }
+            }
+            
+            prompt = `Generate quiz questions based on: "${aiSettings.topic}"
 
 RULES:
 - Follow all specifications in the request exactly
@@ -197,13 +237,10 @@ RULES:
 
 RESPOND WITH ONLY VALID JSON (no markdown, no explanation):
 ${jsonExample}`;
-        } else if (aiMode === 'paste') {
-          const altInstr = aiSettings.numAlts === 'inherited' ? 
-            'Keep ALL alternatives exactly as provided (do not add or remove any)' : 
-            `Use exactly ${aiSettings.numAlts} alternatives per question`;
-          prompt = `Convert these questions to JSON format. The input may be in various formats (plain text, numbered list, or tabular/spreadsheet format with tabs or commas separating columns):
+          } else if (aiMode === 'paste') {
+            prompt = `Convert these questions to JSON format. The input may be in various formats (plain text, numbered list, or tabular/spreadsheet format with tabs or commas separating columns):
 
-${aiSettings.pastedQuestions}
+${batchContent}
 
 RULES:
 - Parse the input format correctly (could be tab-separated table, comma-separated, or plain text)
@@ -219,10 +256,10 @@ RULES:
 
 RESPOND WITH ONLY VALID JSON (no markdown, no explanation):
 ${jsonExample}`;
-        } else {
-          const content = fileContent?.text || '';
-          const extractAll = aiSettings.useAllQuestions;
-          prompt = `${extractAll ? 'Extract ALL quiz questions from this document' : 'Generate ' + aiSettings.numQuestions + ' quiz questions based on this content'}:
+          } else {
+            const content = fileContent?.text || '';
+            const extractAll = aiSettings.useAllQuestions;
+            prompt = `${extractAll ? 'Extract ALL quiz questions from this document' : 'Generate ' + aiSettings.numQuestions + ' quiz questions based on this content'}:
 
 ${content}
 
@@ -238,9 +275,8 @@ RULES:
 
 RESPOND WITH ONLY VALID JSON (no markdown, no code blocks, no explanation):
 ${jsonExample}`;
-        }
+          }
 
-        try {
           const res = await fetch('/api/generate', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt }), signal: abortControllerRef.current.signal
@@ -248,33 +284,67 @@ ${jsonExample}`;
           const data = await res.json();
           if (data.error) throw new Error(data.error);
           
-          let parsed = null;
           let responseText = data.text || '';
+          responseText = responseText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
           
-          // Remove markdown code blocks if present
-          responseText = responseText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
-          
-          // Try to find JSON object
           const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            try { 
-              parsed = JSON.parse(jsonMatch[0]); 
-            } catch (e) {
-              // Try to fix common JSON issues
-              let fixed = jsonMatch[0]
-                .replace(/,\s*}/g, '}')  // trailing commas
-                .replace(/,\s*]/g, ']')  // trailing commas in arrays
-                .replace(/'/g, '"');      // single quotes to double
-              try { parsed = JSON.parse(fixed); } catch (e2) {}
+          if (!jsonMatch) throw new Error('No JSON found in response');
+          
+          let jsonStr = jsonMatch[0];
+          const openBraces = (jsonStr.match(/\{/g) || []).length;
+          const closeBraces = (jsonStr.match(/\}/g) || []).length;
+          const openBrackets = (jsonStr.match(/\[/g) || []).length;
+          const closeBrackets = (jsonStr.match(/\]/g) || []).length;
+          
+          if (openBraces > closeBraces || openBrackets > closeBrackets) {
+            for (let i = 0; i < openBrackets - closeBrackets; i++) jsonStr += ']';
+            for (let i = 0; i < openBraces - closeBraces; i++) jsonStr += '}';
+          }
+          
+          let parsed;
+          try { 
+            parsed = JSON.parse(jsonStr); 
+          } catch (e) {
+            let fixed = jsonStr.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']').replace(/'/g, '"').replace(/[\x00-\x1F\x7F]/g, ' ');
+            parsed = JSON.parse(fixed);
+          }
+          
+          return parsed?.questions || [];
+        };
+
+        try {
+          let allParsedQuestions = [];
+          
+          if (aiMode === 'paste') {
+            // Split into batches for paste mode
+            const batches = splitIntoBatches(aiSettings.pastedQuestions, 10);
+            const totalBatches = batches.length;
+            
+            if (totalBatches > 1) {
+              setGenStatus(`Processing ${totalBatches} batches...`);
+            } else {
+              setGenStatus('Generating questions... This may take 10-20 seconds.');
             }
+            
+            for (let i = 0; i < batches.length; i++) {
+              if (abortControllerRef.current.signal.aborted) break;
+              if (totalBatches > 1) {
+                setGenStatus(`Processing batch ${i + 1} of ${totalBatches}...`);
+              }
+              const batchQuestions = await processOneBatch(batches[i], i + 1, totalBatches);
+              allParsedQuestions = [...allParsedQuestions, ...batchQuestions];
+            }
+          } else {
+            // Single call for topic and upload modes
+            setGenStatus('Generating questions... This may take 10-20 seconds.');
+            allParsedQuestions = await processOneBatch(null, 1, 1);
           }
           
-          if (!parsed?.questions || !Array.isArray(parsed.questions)) {
-            console.error('Failed to parse:', responseText.substring(0, 500));
-            throw new Error('Could not parse AI response. Please try again.');
+          if (allParsedQuestions.length === 0) {
+            throw new Error('No questions were generated. Please try again.');
           }
           
-          const newQs = parsed.questions.map((q, i) => {
+          const newQs = allParsedQuestions.map((q, i) => {
             const alts = q.alternatives || [];
             const processedAlts = aiSettings.randomizeAlts ? shuffleArray(alts) : alts;
             
@@ -311,7 +381,8 @@ ${jsonExample}`;
           setQuestions([...questions, ...newQs]);
           setLastPrompt(aiMode === 'topic' ? aiSettings.topic : aiMode === 'paste' ? aiSettings.pastedQuestions : 'From document');
           setPromptExpanded(false);
-          setShowAIPanel(false); setGenStatus(''); setUploadedFile(null); setFileContent(null);
+          setGenStatus('');
+          setShowAIPanel(false); setUploadedFile(null); setFileContent(null);
         } catch (err) {
           if (err.name === 'AbortError') setGenStatus('Cancelled.');
           else setGenStatus('Error: ' + err.message);
@@ -440,6 +511,12 @@ ${jsonExample}`;
                 </div>
               </div>
             )}
+            
+            {genStatus && !showAIPanel && (
+              <div style={{ marginBottom: '20px', padding: '12px 18px', backgroundColor: genStatus.includes('Error') ? '#fef2f2' : '#fffbeb', borderRadius: '4px', border: '1px solid ' + (genStatus.includes('Error') ? '#fecaca' : '#fde68a'), color: genStatus.includes('Error') ? '#dc2626' : '#d97706', fontSize: '14px' }}>
+                {genStatus}
+              </div>
+            )}
 
             {showAIPanel && (
               <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
@@ -469,6 +546,9 @@ ${jsonExample}`;
                         <label style={{ display: 'block', marginBottom: '8px', color: '#666', fontSize: '13px', fontWeight: '500' }}>Paste your questions</label>
                         <textarea value={aiSettings.pastedQuestions} onChange={e => setAiSettings({ ...aiSettings, pastedQuestions: e.target.value })} placeholder={"Questions with alternatives (mark correct with *):\nWhat is a bloodborne pathogen?\na) Digestive bacterium\nb) *Microorganism in blood\nc) Cold virus\n\nOr paste from spreadsheet (tab-separated table)"} rows={6} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'monospace', fontSize: '13px' }} />
                         <p style={{ margin: '8px 0 0', color: '#999', fontSize: '12px' }}>💡 Supports plain text, numbered lists, or spreadsheet tables. Mark correct with * or include a "Correct Answer" column.</p>
+                        {aiSettings.pastedQuestions.split('\n').filter(l => l.trim().startsWith('Q') || l.trim().match(/^\d+[\.\)]/)).length > 15 && (
+                          <p style={{ margin: '8px 0 0', color: '#2563eb', fontSize: '12px' }}>ℹ️ Large quiz detected ({aiSettings.pastedQuestions.split('\n').filter(l => l.trim().startsWith('Q') || l.trim().match(/^\d+[\.\)]/)).length}+ questions). Will process in batches automatically.</p>
+                        )}
                         
                         <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
                           <div><label style={{ display: 'block', marginBottom: '6px', color: '#666', fontSize: '13px' }}>Points</label><input type="number" value={aiSettings.points} onChange={e => setAiSettings({ ...aiSettings, points: +e.target.value })} style={inputStyle} /></div>
